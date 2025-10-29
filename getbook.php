@@ -18,6 +18,11 @@ curl_setopt($ch, CURLOPT_CAINFO, __DIR__ . DIRECTORY_SEPARATOR . 'cert.cer');
 curl_setopt($ch, CURLOPT_HEADER, true);
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 $response = curl_exec($ch);
+if ($response === false) {
+    error_log('Curl error: ' . curl_error($ch), 0);
+    http_response_code(500);
+    exit;
+}
 $curl_info = curl_getinfo($ch);
 curl_close($ch);
 $header_size = $curl_info['header_size'];

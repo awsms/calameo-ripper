@@ -1,7 +1,45 @@
-# Calameo Download PDF
+# calameo-ripper
 
-*Calameo Download PDF* est une page web permettant de télécharger un document [Calameo](https://fr.calameo.com/) au format PDF avec l'impression du navigateur web.
+Toolkit to download Calameo publications and export them to PDF, SVG/SVGZ, or JPG.
 
-L'application est [disponible ici](https://comfoxx.github.io/calameo-download-pdf/).
+## Quick start
 
-Note : Le texte est conservé avec Chrome, mais pas avec Firefox qui trame le texte. L'utilisation de Chrome (et sans doute les navigateurs basés sur Chromium) est recommandé.
+```bash
+go run . 'https://www.calameo.com/read/0004132596a81e123a0a9'
+```
+
+## Defaults
+
+- `-formats=pdf`
+- `-pdf-source=svgz`
+- `-svg-renderer=auto`
+- `-embed-ocr=true`
+- `-ocr-sort=line`
+- `-ocr-use-svg-size=true`
+- `-ocr-fit=page`
+- `-ocr-placement=simple`
+- `-ocr-flip-y=true` (set `false` if the text is vertically inverted)
+
+## Common flags
+
+- `-o <file>`: output PDF path.
+- `-formats pdf,jpg,svg,svgz`: select outputs.
+- `-pdf-source svgz|jpg`: source for PDF generation.
+- `-embed-ocr`: toggle OCR overlay.
+- `-ocr-sort source|line|pdf`: OCR ordering.
+- `-ocr-use-svg-size`: use SVG dimensions for OCR scaling.
+- `-ocr-fit page|bbox`: OCR scaling mode.
+- `-ocr-placement simple|matrix`: OCR placement mode.
+
+## Examples
+
+```bash
+go run . -o book.pdf -formats pdf,jpg 'https://www.calameo.com/books/000413259473d01615745'
+go run . -formats svg,svgz,jpg 000413259473d01615745
+```
+
+Raw page downloads are written to `./<title>-assets` by default, or to `-outdir` if provided.
+
+### TODO
+
+- [ ] Mass-rip accounts

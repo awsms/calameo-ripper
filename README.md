@@ -22,7 +22,9 @@ go run . 'https://www.calameo.com/read/0004132596a81e123a0a9'
 
 ## Common flags
 
-- `-o <file>`: output PDF path.
+- `-o <file>`: output PDF path (single input only).
+- `-outdir <dir>`: output directory for generated files (PDF, text exports).
+- `-assets-outdir <dir>`: directory for raw page downloads (svg/svgz/jpg).
 - `-formats pdf,jpg,svg,svgz`: select outputs.
 - `-pdf-source svgz|jpg`: source for PDF generation.
 - `-embed-ocr`: toggle OCR overlay.

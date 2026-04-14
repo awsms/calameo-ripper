@@ -106,7 +106,8 @@ func main() {
 	var (
 		outputPath      = flag.String("o", "", "output PDF path")
 		formats         = flag.String("formats", "pdf", "comma-separated outputs: pdf,jpg,svg,svgz")
-		outDir          = flag.String("outdir", "", "directory for raw page downloads when requesting jpg/svg/svgz")
+		outDir          = flag.String("outdir", "", "output directory for generated files (PDF, text exports)")
+		assetsOutDir    = flag.String("assets-outdir", "", "directory for raw page downloads when requesting jpg/svg/svgz")
 		pdfSource       = flag.String("pdf-source", "svgz", "PDF source: svgz or jpg")
 		renderer        = flag.String("svg-renderer", "auto", "SVG renderer for pdf-source=svgz: auto,resvg,rsvg")
 		optimize        = flag.String("optimize-pdf", "lossless", "PDF optimization: off, lossless, lossy (requires gs)")
@@ -165,7 +166,7 @@ func main() {
 		exitErr(errors.New("-o can only be used with a single input"))
 	}
 	for _, input := range inputs {
-		if err := processBook(ctx, client, input, len(inputs), outputs, *outputPath, *outDir, *textBinOut, *textBinJSON, *embedOCR, *pdfSource, *renderer, *optimize, *jpegQ, *ocrFlipY, *ocrFit, *ocrScaleX, *ocrScaleY, *ocrOffsetX, *ocrOffsetY, *ocrUseSVG, *ocrSort, *ocrPlace, *ocrDebugPage, *ocrDebugMarkers, *overwrite, *workers); err != nil {
+		if err := processBook(ctx, client, input, len(inputs), outputs, *outputPath, *outDir, *assetsOutDir, *textBinOut, *textBinJSON, *embedOCR, *pdfSource, *renderer, *optimize, *jpegQ, *ocrFlipY, *ocrFit, *ocrScaleX, *ocrScaleY, *ocrOffsetX, *ocrOffsetY, *ocrUseSVG, *ocrSort, *ocrPlace, *ocrDebugPage, *ocrDebugMarkers, *overwrite, *workers); err != nil {
 			exitErr(err)
 		}
 	}
@@ -373,7 +374,7 @@ func extractBookCodesFromHTML(html string) []string {
 	return codes
 }
 
-func processBook(ctx context.Context, client *http.Client, input string, totalInputs int, outputs outputOptions, outputPath, outDir, textBinOut, textBinJSON string, embedOCR bool, pdfSource, renderer, optimize string, jpegQ int, ocrFlipY bool, ocrFit string, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY float64, ocrUseSVG bool, ocrSort, ocrPlace string, ocrDebugPage int, ocrDebugMarkers bool, overwrite bool, workers int) error {
+func processBook(ctx context.Context, client *http.Client, input string, totalInputs int, outputs outputOptions, outputPath, outDir, assetsOutDir, textBinOut, textBinJSON string, embedOCR bool, pdfSource, renderer, optimize string, jpegQ int, ocrFlipY bool, ocrFit string, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY float64, ocrUseSVG bool, ocrSort, ocrPlace string, ocrDebugPage int, ocrDebugMarkers bool, overwrite bool, workers int) error {
 	bookCode, err := extractBookCode(input)
 	if err != nil {
 		return err
@@ -405,6 +406,14 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 	out := outputPath
 	if out == "" {
 		out = sanitizeFilename(meta.Name) + ".pdf"
+		if outDir != "" {
+			out = filepath.Join(outDir, out)
+		}
+	}
+	if outDir != "" {
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return fmt.Errorf("create output dir: %w", err)
+		}
 	}
 	if outputs.PDF && !overwrite {
 		if _, err := os.Stat(out); err == nil {
@@ -415,7 +424,7 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 		}
 	}
 
-	rawDir := outDir
+	rawDir := assetsOutDir
 	if rawDir == "" && outputs.needsRawDir() {
 		rawDir = sanitizeFilename(meta.Name) + "-assets"
 	} else if rawDir != "" && outputs.needsRawDir() && totalInputs > 1 {
@@ -440,6 +449,9 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 			target := textBinOut
 			if target == "auto" {
 				target = sanitizeFilename(meta.Name) + ".text.bin"
+				if outDir != "" {
+					target = filepath.Join(outDir, target)
+				}
 			} else if target != "-" && totalInputs > 1 {
 				target = sanitizeFilename(meta.Name) + "." + filepath.Base(target)
 			}
@@ -452,6 +464,9 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 			target := textBinJSON
 			if target == "auto" {
 				target = sanitizeFilename(meta.Name) + ".text.json"
+				if outDir != "" {
+					target = filepath.Join(outDir, target)
+				}
 			} else if target != "-" && totalInputs > 1 {
 				target = sanitizeFilename(meta.Name) + "." + filepath.Base(target)
 			}

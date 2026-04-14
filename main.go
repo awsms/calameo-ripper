@@ -118,6 +118,8 @@ func main() {
 		ocrScaleY       = flag.Float64("ocr-scale-y", 1, "OCR Y scale multiplier")
 		ocrOffsetX      = flag.Float64("ocr-offset-x", 0, "OCR X offset (source units, applied before scaling)")
 		ocrOffsetY      = flag.Float64("ocr-offset-y", 0, "OCR Y offset (source units, applied before scaling)")
+		accountPages    = flag.Int("account-pages", 10, "max account pages to scan when input is /accounts/<id>")
+		overwrite       = flag.Bool("overwrite", false, "overwrite existing output files")
 		workers         = flag.Int("workers", defaultWorkers, "number of concurrent page downloads")
 		timeout         = flag.Duration("timeout", defaultTimeout, "HTTP timeout")
 	)
@@ -145,15 +147,226 @@ func main() {
 	if err != nil {
 		exitErr(err)
 	}
-	inputs := flag.Args()
+	inputs, err := expandInputs(ctx, client, flag.Args(), *accountPages)
+	if err != nil {
+		exitErr(err)
+	}
+	if len(inputs) == 0 {
+		exitErr(errors.New("no inputs to process after expansion"))
+	}
+	if len(inputs) > 1 && *outputPath != "" {
+		exitErr(errors.New("-o can only be used with a single input"))
+	}
 	for _, input := range inputs {
-		if err := processBook(ctx, client, input, len(inputs), outputs, *outputPath, *outDir, *textBinOut, *textBinJSON, *embedOCR, *pdfSource, *renderer, *optimize, *jpegQ, *ocrFlipY, *ocrFit, *ocrScaleX, *ocrScaleY, *ocrOffsetX, *ocrOffsetY, *ocrUseSVG, *ocrSort, *ocrPlace, *ocrDebugPage, *ocrDebugMarkers, *workers); err != nil {
+		if err := processBook(ctx, client, input, len(inputs), outputs, *outputPath, *outDir, *textBinOut, *textBinJSON, *embedOCR, *pdfSource, *renderer, *optimize, *jpegQ, *ocrFlipY, *ocrFit, *ocrScaleX, *ocrScaleY, *ocrOffsetX, *ocrOffsetY, *ocrUseSVG, *ocrSort, *ocrPlace, *ocrDebugPage, *ocrDebugMarkers, *overwrite, *workers); err != nil {
 			exitErr(err)
 		}
 	}
 }
 
-func processBook(ctx context.Context, client *http.Client, input string, totalInputs int, outputs outputOptions, outputPath, outDir, textBinOut, textBinJSON string, embedOCR bool, pdfSource, renderer, optimize string, jpegQ int, ocrFlipY bool, ocrFit string, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY float64, ocrUseSVG bool, ocrSort, ocrPlace string, ocrDebugPage int, ocrDebugMarkers bool, workers int) error {
+func expandInputs(ctx context.Context, client *http.Client, inputs []string, accountPages int) ([]string, error) {
+	if len(inputs) == 0 {
+		return nil, nil
+	}
+	if accountPages <= 0 {
+		accountPages = 1
+	}
+	seen := make(map[string]struct{})
+	var out []string
+	for _, input := range inputs {
+		if isAccountURL(input) {
+			codes, err := fetchAccountBookCodes(ctx, client, input, accountPages)
+			if err != nil {
+				return nil, err
+			}
+			for _, code := range codes {
+				if _, ok := seen[code]; ok {
+					continue
+				}
+				seen[code] = struct{}{}
+				out = append(out, code)
+			}
+			continue
+		}
+		if _, ok := seen[input]; ok {
+			continue
+		}
+		seen[input] = struct{}{}
+		out = append(out, input)
+	}
+	return out, nil
+}
+
+func isAccountURL(input string) bool {
+	u, err := url.Parse(strings.TrimSpace(input))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "accounts" && parts[1] != "" {
+		return true
+	}
+	return false
+}
+
+func fetchAccountBookCodes(ctx context.Context, client *http.Client, accountURL string, maxPages int) ([]string, error) {
+	accountID, err := extractAccountID(accountURL)
+	if err != nil {
+		return nil, err
+	}
+	codes, err := fetchAccountBookCodesAPI(ctx, client, accountID, maxPages)
+	if err == nil && len(codes) > 0 {
+		return codes, nil
+	}
+
+	base, err := url.Parse(accountURL)
+	if err != nil {
+		return nil, err
+	}
+	base.RawQuery = ""
+	base.Fragment = ""
+	baseURL := base.String()
+
+	codes, err = fetchAccountBookCodesHTML(ctx, client, baseURL, maxPages)
+	if err != nil {
+		return nil, err
+	}
+	if len(codes) == 0 {
+		return nil, fmt.Errorf("no publications found on account page %s (page may be JS-rendered)", baseURL)
+	}
+	return codes, nil
+}
+
+type accountBooksResponse struct {
+	Status  string `json:"status"`
+	Content struct {
+		Total int `json:"total"`
+		Start int `json:"start"`
+		Step  struct {
+			Current int `json:"current"`
+			Max     int `json:"max"`
+		} `json:"step"`
+		List []struct {
+			Code string `json:"code"`
+		} `json:"list"`
+	} `json:"content"`
+}
+
+func fetchAccountBookCodesAPI(ctx context.Context, client *http.Client, accountID string, maxPages int) ([]string, error) {
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+	step := 100
+	start := 0
+	var codes []string
+	seen := make(map[string]struct{})
+
+	for page := 1; page <= maxPages; page++ {
+		endpoint := fmt.Sprintf("https://d.calameo.com/pinwheel/public/account/book/get?account=%s&start=%d&step=%d", url.QueryEscape(accountID), start, step)
+		body, err := downloadWithRetry(ctx, client, endpoint, "https://www.calameo.com/accounts/"+accountID)
+		if err != nil {
+			return nil, fmt.Errorf("fetch account books (api): %w", err)
+		}
+		var resp accountBooksResponse
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("decode account books (api): %w", err)
+		}
+		if resp.Status != "ok" {
+			return nil, fmt.Errorf("account books (api) returned status %q", resp.Status)
+		}
+		if resp.Content.Step.Current > 0 {
+			step = resp.Content.Step.Current
+		}
+		for _, item := range resp.Content.List {
+			if item.Code == "" {
+				continue
+			}
+			if _, ok := seen[item.Code]; ok {
+				continue
+			}
+			seen[item.Code] = struct{}{}
+			codes = append(codes, item.Code)
+		}
+		start += step
+		if start >= resp.Content.Total || len(resp.Content.List) == 0 {
+			break
+		}
+	}
+	return codes, nil
+}
+
+func fetchAccountBookCodesHTML(ctx context.Context, client *http.Client, baseURL string, maxPages int) ([]string, error) {
+	var codes []string
+	seen := make(map[string]struct{})
+	emptyPages := 0
+	for page := 1; page <= maxPages; page++ {
+		pageURL := baseURL
+		if page > 1 {
+			u, err := url.Parse(baseURL)
+			if err != nil {
+				return nil, err
+			}
+			q := u.Query()
+			q.Set("page", strconv.Itoa(page))
+			u.RawQuery = q.Encode()
+			pageURL = u.String()
+		}
+		body, err := downloadWithRetry(ctx, client, pageURL, baseURL)
+		if err != nil {
+			return nil, fmt.Errorf("fetch account page %d: %w", page, err)
+		}
+		found := extractBookCodesFromHTML(string(body))
+		newCount := 0
+		for _, code := range found {
+			if _, ok := seen[code]; ok {
+				continue
+			}
+			seen[code] = struct{}{}
+			codes = append(codes, code)
+			newCount++
+		}
+		if newCount == 0 {
+			emptyPages++
+			if page > 1 || emptyPages >= 2 {
+				break
+			}
+		}
+	}
+	return codes, nil
+}
+
+func extractAccountID(input string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(input))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid account url %q", input)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "accounts" && parts[1] != "" {
+		return parts[1], nil
+	}
+	return "", fmt.Errorf("could not extract account id from %q", input)
+}
+
+func extractBookCodesFromHTML(html string) []string {
+	re := regexp.MustCompile(`/((?:books|read))/([A-Za-z0-9]{20,24})`)
+	matches := re.FindAllStringSubmatch(html, -1)
+	seen := make(map[string]struct{})
+	var codes []string
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		code := m[2]
+		if _, ok := seen[code]; ok {
+			continue
+		}
+		seen[code] = struct{}{}
+		codes = append(codes, code)
+	}
+	return codes
+}
+
+func processBook(ctx context.Context, client *http.Client, input string, totalInputs int, outputs outputOptions, outputPath, outDir, textBinOut, textBinJSON string, embedOCR bool, pdfSource, renderer, optimize string, jpegQ int, ocrFlipY bool, ocrFit string, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY float64, ocrUseSVG bool, ocrSort, ocrPlace string, ocrDebugPage int, ocrDebugMarkers bool, overwrite bool, workers int) error {
 	bookCode, err := extractBookCode(input)
 	if err != nil {
 		return err
@@ -171,6 +384,14 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 	out := outputPath
 	if out == "" {
 		out = sanitizeFilename(meta.Name) + ".pdf"
+	}
+	if outputs.PDF && !overwrite {
+		if _, err := os.Stat(out); err == nil {
+			fmt.Printf("Skipping %s (already exists)\n", out)
+			return nil
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("check output %s: %w", out, err)
+		}
 	}
 
 	rawDir := outDir

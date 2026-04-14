@@ -39,7 +39,3 @@ go run . 0004132596a81e123a0a9 00041325919b833642cb9
 ```
 
 Raw page downloads are written to `./<title>-assets` by default, or to `-outdir` if provided.
-
-### TODO
-
-- [ ] Mass-rip accounts

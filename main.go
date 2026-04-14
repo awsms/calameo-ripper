@@ -36,6 +36,8 @@ const (
 	defaultTimeout   = 45 * time.Second
 )
 
+var errTextBinUnavailable = errors.New("text.bin unavailable")
+
 type bookResponse struct {
 	Status  string `json:"status"`
 	Content struct {
@@ -58,6 +60,9 @@ type bookResponse struct {
 			} `json:"secured"`
 		} `json:"domains"`
 		Features struct {
+			SVG struct {
+				Enabled bool `json:"enabled"`
+			} `json:"svg"`
 			Search struct {
 				Bin struct {
 					URL  string `json:"url"`
@@ -80,6 +85,8 @@ type bookMetadata struct {
 	Token      string
 	TextBinURL string
 	TextBase   string
+	TextPath   string
+	SVGEnabled bool
 }
 
 type pageFile struct {
@@ -381,6 +388,20 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 		return fmt.Errorf("book %s returned no pages", bookCode)
 	}
 
+	localOutputs := outputs
+	pdfSourceLocal := pdfSource
+	if !meta.SVGEnabled {
+		if localOutputs.SVG || localOutputs.SVGZ {
+			fmt.Printf("SVG not enabled for %s (skipping SVG/SVGZ downloads)\n", meta.Name)
+			localOutputs.SVG = false
+			localOutputs.SVGZ = false
+		}
+		if localOutputs.PDF && strings.EqualFold(strings.TrimSpace(pdfSourceLocal), "svgz") {
+			fmt.Printf("SVG not enabled for %s (falling back to JPG PDF)\n", meta.Name)
+			pdfSourceLocal = "jpg"
+		}
+	}
+
 	out := outputPath
 	if out == "" {
 		out = sanitizeFilename(meta.Name) + ".pdf"
@@ -407,10 +428,15 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 	if textBinOut != "" || textBinJSON != "" || embedOCR {
 		data, err := fetchTextBinBytes(ctx, client, meta)
 		if err != nil {
-			return err
+			if errors.Is(err, errTextBinUnavailable) && textBinOut == "" && textBinJSON == "" && embedOCR {
+				fmt.Printf("OCR text.bin not available for %s (skipping OCR layer)\n", meta.Name)
+				data = nil
+			} else {
+				return err
+			}
 		}
 
-		if textBinOut != "" {
+		if textBinOut != "" && data != nil {
 			target := textBinOut
 			if target == "auto" {
 				target = sanitizeFilename(meta.Name) + ".text.bin"
@@ -422,7 +448,7 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 			}
 		}
 
-		if textBinJSON != "" {
+		if textBinJSON != "" && data != nil {
 			target := textBinJSON
 			if target == "auto" {
 				target = sanitizeFilename(meta.Name) + ".text.json"
@@ -434,7 +460,7 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 			}
 		}
 
-		if embedOCR {
+		if embedOCR && data != nil {
 			tb, err := parseTextBin(data)
 			if err != nil {
 				return err
@@ -443,7 +469,7 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 		}
 	}
 
-	if outputs.needsRawDir() {
+	if localOutputs.needsRawDir() {
 		fmt.Printf("Raw assets: %s\n", rawDir)
 		if err := os.MkdirAll(rawDir, 0o755); err != nil {
 			return fmt.Errorf("create raw output dir: %w", err)
@@ -451,23 +477,23 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 	}
 
 	var jpgPages []pageFile
-	if outputs.JPG {
+	if localOutputs.JPG {
 		jpgPages, err = downloadImagePages(ctx, client, meta, rawDir, workers, true)
 		if err != nil {
 			return err
 		}
 	}
 
-	if outputs.SVG || outputs.SVGZ {
-		if err := downloadSVGPages(ctx, client, meta, rawDir, workers, outputs.SVG, outputs.SVGZ); err != nil {
+	if localOutputs.SVG || localOutputs.SVGZ {
+		if err := downloadSVGPages(ctx, client, meta, rawDir, workers, localOutputs.SVG, localOutputs.SVGZ); err != nil {
 			return err
 		}
 	}
 
-	if outputs.PDF {
-		switch strings.ToLower(strings.TrimSpace(pdfSource)) {
+	if localOutputs.PDF {
+		switch strings.ToLower(strings.TrimSpace(pdfSourceLocal)) {
 		case "svgz":
-			if err := buildPDFfromSVG(ctx, client, meta, out, rawDir, outputs.SVG, workers, renderer, optimize, jpegQ, textOverlay, ocrFlipY, ocrFit, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY, ocrUseSVG, ocrSort, ocrPlace, ocrDebugPage, ocrDebugMarkers); err != nil {
+			if err := buildPDFfromSVG(ctx, client, meta, out, rawDir, localOutputs.SVG, workers, renderer, optimize, jpegQ, textOverlay, ocrFlipY, ocrFit, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY, ocrUseSVG, ocrSort, ocrPlace, ocrDebugPage, ocrDebugMarkers); err != nil {
 				return err
 			}
 		case "jpg":
@@ -489,11 +515,11 @@ func processBook(ctx context.Context, client *http.Client, input string, totalIn
 				return err
 			}
 		default:
-			return fmt.Errorf("unsupported -pdf-source %q (use svgz or jpg)", pdfSource)
+			return fmt.Errorf("unsupported -pdf-source %q (use svgz or jpg)", pdfSourceLocal)
 		}
 	}
 
-	if outputs.PDF {
+	if localOutputs.PDF {
 		fmt.Printf("Saved %s\n", out)
 	}
 	return nil
@@ -555,6 +581,8 @@ func fetchBookMetadata(ctx context.Context, client *http.Client, bookCode string
 		Token:      buildToken(expires, path, signature),
 		TextBinURL: normalizeURL(data.Content.Features.Search.Bin.URL),
 		TextBase:   normalizeURL(data.Content.Domains.Secured.Text),
+		TextPath:   strings.TrimSpace(data.Content.Features.Search.Bin.Path),
+		SVGEnabled: data.Content.Features.SVG.Enabled,
 	}, nil
 }
 
@@ -757,31 +785,54 @@ func (e httpStatusError) Error() string {
 }
 
 func fetchTextBinBytes(ctx context.Context, client *http.Client, meta bookMetadata) ([]byte, error) {
-	if meta.TextBinURL == "" {
-		return nil, errors.New("text.bin URL not present in metadata")
+	var candidates []string
+	if meta.TextBinURL != "" {
+		candidates = append(candidates, meta.TextBinURL)
+		if meta.Token != "" && !strings.Contains(meta.TextBinURL, "_token_") {
+			candidates = append(candidates, meta.TextBinURL+meta.Token)
+		}
 	}
-
-	candidates := []string{meta.TextBinURL}
-	if meta.Token != "" && !strings.Contains(meta.TextBinURL, "_token_") {
-		candidates = append(candidates, meta.TextBinURL+meta.Token)
-	}
-	if meta.TextBase != "" && meta.Key != "" && meta.Token != "" {
+	if meta.TextBase != "" && meta.Key != "" {
 		base := strings.TrimRight(meta.TextBase, "/")
-		candidates = append(candidates, base+"/"+meta.Key+"/text.bin"+meta.Token)
+		candidates = append(candidates, base+"/"+meta.Key+"/text.bin")
+		if meta.Token != "" {
+			candidates = append(candidates, base+"/"+meta.Key+"/text.bin"+meta.Token)
+		}
+	}
+	if meta.TextBase != "" && meta.TextPath != "" {
+		base := strings.TrimRight(meta.TextBase, "/")
+		path := strings.TrimLeft(meta.TextPath, "/")
+		candidates = append(candidates, base+"/"+path)
+		if meta.Token != "" {
+			candidates = append(candidates, base+"/"+path+meta.Token)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil, errors.New("text.bin URL not present in metadata")
 	}
 
 	var body []byte
 	var err error
+	var lastStatus int
 	for i, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
 		body, err = downloadWithRetry(ctx, client, candidate, meta.PublicURL)
 		if err == nil {
 			break
+		}
+		if statusErr, ok := err.(httpStatusError); ok {
+			lastStatus = statusErr.Code
 		}
 		if statusErr, ok := err.(httpStatusError); ok && statusErr.Code == http.StatusForbidden && i < len(candidates)-1 {
 			continue
 		}
 		if i < len(candidates)-1 {
 			continue
+		}
+		if lastStatus == http.StatusForbidden || lastStatus == http.StatusNotFound {
+			return nil, errTextBinUnavailable
 		}
 		return nil, fmt.Errorf("download text.bin: %w", err)
 	}

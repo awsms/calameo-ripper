@@ -123,14 +123,13 @@ func main() {
 	)
 	flag.Parse()
 
-	if flag.NArg() != 1 {
-		fmt.Fprintf(os.Stderr, "usage: %s [flags] <calameo-url-or-bkcode>\n", filepath.Base(os.Args[0]))
+	if flag.NArg() < 1 {
+		fmt.Fprintf(os.Stderr, "usage: %s [flags] <calameo-url-or-bkcode> [more...]\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
 
-	bookCode, err := extractBookCode(flag.Arg(0))
-	if err != nil {
-		exitErr(err)
+	if flag.NArg() > 1 && *outputPath != "" {
+		exitErr(errors.New("-o can only be used with a single input"))
 	}
 
 	transport := &http.Transport{
@@ -146,59 +145,78 @@ func main() {
 	if err != nil {
 		exitErr(err)
 	}
+	inputs := flag.Args()
+	for _, input := range inputs {
+		if err := processBook(ctx, client, input, len(inputs), outputs, *outputPath, *outDir, *textBinOut, *textBinJSON, *embedOCR, *pdfSource, *renderer, *optimize, *jpegQ, *ocrFlipY, *ocrFit, *ocrScaleX, *ocrScaleY, *ocrOffsetX, *ocrOffsetY, *ocrUseSVG, *ocrSort, *ocrPlace, *ocrDebugPage, *ocrDebugMarkers, *workers); err != nil {
+			exitErr(err)
+		}
+	}
+}
+
+func processBook(ctx context.Context, client *http.Client, input string, totalInputs int, outputs outputOptions, outputPath, outDir, textBinOut, textBinJSON string, embedOCR bool, pdfSource, renderer, optimize string, jpegQ int, ocrFlipY bool, ocrFit string, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY float64, ocrUseSVG bool, ocrSort, ocrPlace string, ocrDebugPage int, ocrDebugMarkers bool, workers int) error {
+	bookCode, err := extractBookCode(input)
+	if err != nil {
+		return err
+	}
 
 	meta, err := fetchBookMetadata(ctx, client, bookCode)
 	if err != nil {
-		exitErr(err)
+		return err
 	}
 
 	if meta.PageCount <= 0 {
-		exitErr(fmt.Errorf("book %s returned no pages", bookCode))
+		return fmt.Errorf("book %s returned no pages", bookCode)
 	}
 
-	out := *outputPath
+	out := outputPath
 	if out == "" {
 		out = sanitizeFilename(meta.Name) + ".pdf"
 	}
 
-	rawDir := *outDir
+	rawDir := outDir
 	if rawDir == "" && outputs.needsRawDir() {
 		rawDir = sanitizeFilename(meta.Name) + "-assets"
+	} else if rawDir != "" && outputs.needsRawDir() && totalInputs > 1 {
+		rawDir = filepath.Join(rawDir, sanitizeFilename(meta.Name)+"-assets")
 	}
 
 	fmt.Printf("Book: %s\nPages: %d\nOutput: %s\n", meta.Name, meta.PageCount, out)
 
 	var textOverlay *textBin
-	if *textBinOut != "" || *textBinJSON != "" || *embedOCR {
+	if textBinOut != "" || textBinJSON != "" || embedOCR {
 		data, err := fetchTextBinBytes(ctx, client, meta)
 		if err != nil {
-			exitErr(err)
+			return err
 		}
 
-		if *textBinOut != "" {
-			target := *textBinOut
+		if textBinOut != "" {
+			target := textBinOut
 			if target == "auto" {
 				target = sanitizeFilename(meta.Name) + ".text.bin"
+			} else if target != "-" && totalInputs > 1 {
+				target = sanitizeFilename(meta.Name) + "." + filepath.Base(target)
 			}
 			if err := writeTextBin(target, data); err != nil {
-				exitErr(err)
+				return err
 			}
 		}
 
-		if *textBinJSON != "" {
-			target := *textBinJSON
+		if textBinJSON != "" {
+			target := textBinJSON
 			if target == "auto" {
 				target = sanitizeFilename(meta.Name) + ".text.json"
+			} else if target != "-" && totalInputs > 1 {
+				target = sanitizeFilename(meta.Name) + "." + filepath.Base(target)
 			}
 			if err := writeTextBinJSON(target, data); err != nil {
-				exitErr(err)
+				return err
 			}
 		}
 
-		if *embedOCR {
+		if embedOCR {
 			tb, err := parseTextBin(data)
 			if err != nil {
-				exitErr(err)
+				return err
 			}
 			textOverlay = &tb
 		}
@@ -207,56 +225,57 @@ func main() {
 	if outputs.needsRawDir() {
 		fmt.Printf("Raw assets: %s\n", rawDir)
 		if err := os.MkdirAll(rawDir, 0o755); err != nil {
-			exitErr(fmt.Errorf("create raw output dir: %w", err))
+			return fmt.Errorf("create raw output dir: %w", err)
 		}
 	}
 
 	var jpgPages []pageFile
 	if outputs.JPG {
-		jpgPages, err = downloadImagePages(ctx, client, meta, rawDir, *workers, true)
+		jpgPages, err = downloadImagePages(ctx, client, meta, rawDir, workers, true)
 		if err != nil {
-			exitErr(err)
+			return err
 		}
 	}
 
 	if outputs.SVG || outputs.SVGZ {
-		if err := downloadSVGPages(ctx, client, meta, rawDir, *workers, outputs.SVG, outputs.SVGZ); err != nil {
-			exitErr(err)
+		if err := downloadSVGPages(ctx, client, meta, rawDir, workers, outputs.SVG, outputs.SVGZ); err != nil {
+			return err
 		}
 	}
 
 	if outputs.PDF {
-		switch strings.ToLower(strings.TrimSpace(*pdfSource)) {
+		switch strings.ToLower(strings.TrimSpace(pdfSource)) {
 		case "svgz":
-			if err := buildPDFfromSVG(ctx, client, meta, out, rawDir, outputs.SVG, *workers, *renderer, *optimize, *jpegQ, textOverlay, *ocrFlipY, *ocrFit, *ocrScaleX, *ocrScaleY, *ocrOffsetX, *ocrOffsetY, *ocrUseSVG, *ocrSort, *ocrPlace, *ocrDebugPage, *ocrDebugMarkers); err != nil {
-				exitErr(err)
+			if err := buildPDFfromSVG(ctx, client, meta, out, rawDir, outputs.SVG, workers, renderer, optimize, jpegQ, textOverlay, ocrFlipY, ocrFit, ocrScaleX, ocrScaleY, ocrOffsetX, ocrOffsetY, ocrUseSVG, ocrSort, ocrPlace, ocrDebugPage, ocrDebugMarkers); err != nil {
+				return err
 			}
 		case "jpg":
 			pages := jpgPages
 			if len(pages) == 0 {
 				tmpDir, err := os.MkdirTemp("", "calameo-pages-*")
 				if err != nil {
-					exitErr(fmt.Errorf("create temp dir: %w", err))
+					return fmt.Errorf("create temp dir: %w", err)
 				}
 				defer os.RemoveAll(tmpDir)
 
-				pages, err = downloadImagePages(ctx, client, meta, tmpDir, *workers, true)
+				pages, err = downloadImagePages(ctx, client, meta, tmpDir, workers, true)
 				if err != nil {
-					exitErr(err)
+					return err
 				}
 			}
 
 			if err := writePDF(out, meta, pages); err != nil {
-				exitErr(err)
+				return err
 			}
 		default:
-			exitErr(fmt.Errorf("unsupported -pdf-source %q (use svgz or jpg)", *pdfSource))
+			return fmt.Errorf("unsupported -pdf-source %q (use svgz or jpg)", pdfSource)
 		}
 	}
 
 	if outputs.PDF {
 		fmt.Printf("Saved %s\n", out)
 	}
+	return nil
 }
 
 func fetchBookMetadata(ctx context.Context, client *http.Client, bookCode string) (bookMetadata, error) {

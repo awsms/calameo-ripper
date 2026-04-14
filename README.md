@@ -35,7 +35,7 @@ go run . 'https://www.calameo.com/read/0004132596a81e123a0a9'
 
 ```bash
 go run . -o book.pdf -formats pdf,jpg 'https://www.calameo.com/books/000413259473d01615745'
-go run . -formats svg,svgz,jpg 000413259473d01615745
+go run . 0004132596a81e123a0a9 00041325919b833642cb9
 ```
 
 Raw page downloads are written to `./<title>-assets` by default, or to `-outdir` if provided.
